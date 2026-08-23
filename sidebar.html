@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <base target="_top">
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      padding: 20px;
+      color: #333;
+      max-width: 600px;
+      margin: auto;
+    }
+
+    label {
+      display: block;
+      margin-top: 15px;
+      font-weight: bold;
+      font-size: 13px;
+    }
+
+    select,
+    input[type="text"],
+    input[type="date"] {
+      width: 100%;
+      padding: 8px;
+      margin-top: 5px;
+      box-sizing: border-box;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+    }
+
+    button {
+      background-color: #1a73e8;
+      color: white;
+      border: none;
+      cursor: pointer;
+      margin-top: 25px;
+      padding: 12px;
+      width: 100%;
+      font-weight: bold;
+      border-radius: 4px;
+    }
+
+    button:hover {
+      background-color: #1557b0;
+    }
+
+    .spinner {
+      display: none;
+      color: #555;
+      margin-top: 10px;
+      font-size: 13px;
+      text-align: center;
+    }
+
+    .note {
+      font-size: 11px;
+      color: #666;
+      margin-top: 5px;
+    }
+
+    .course-list {
+      margin-top: 10px;
+      border: 1px solid #ddd;
+      padding: 10px;
+      border-radius: 4px;
+      background: #f9f9f9;
+      max-height: 400px;
+      overflow-y: auto;
+    }
+
+    .course-item {
+      margin-bottom: 12px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid #eee;
+    }
+
+    .course-item:last-child {
+      border-bottom: none;
+      margin-bottom: 0;
+      padding-bottom: 0;
+    }
+
+    .course-title {
+      font-size: 14px;
+      font-weight: bold;
+      margin-bottom: 5px;
+    }
+
+    .radio-group {
+      display: flex;
+      gap: 15px;
+      font-size: 12px;
+      margin-left: 24px;
+      margin-top: 6px;
+    }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+  </style>
+</head>
+
+<body>
+  <h2>Advanced Timetable Sync</h2>
+
+  <label>Select Destination Calendar</label>
+  <select id="calSelect"></select>
+
+  <div class="grid-2">
+    <div>
+      <label>Section</label>
+      <select id="sectionSelect" onchange="loadCourses()">
+          <option value="A">Section A</option>
+          <option value="B">Section B</option>
+        </select>
+    </div>
+    <div>
+      <label>Batch</label>
+      <select id="batchSelect" onchange="loadCourses()">
+          <option value="Both">Both (All)</option>
+          <option value="1">Batch 1</option>
+          <option value="2">Batch 2</option>
+        </select>
+    </div>
+  </div>
+
+  <div class="grid-2">
+    <div>
+      <label>Semester Start</label>
+      <input type="date" id="semStart" required/>
+    </div>
+    <div>
+      <label>Mid-Sem Start</label>
+      <input type="date" id="midStart" required/>
+    </div>
+    <div>
+      <label>Mid-Sem End</label>
+      <input type="date" id="midEnd" required/>
+    </div>
+    <div>
+      <label>End-Sem Start</label>
+      <input type="date" id="endStart" required/>
+    </div>
+  </div>
+
+  <label>Select Semester Tab</label>
+  <select id="semSelect" onchange="loadCourses()">
+      <option value="">-- Select Semester --</option>
+    </select>
+
+  <div id="courseContainer" style="display:none;">
+    <label>Select Courses & Durations</label>
+    <div class="note" style="margin-bottom:10px;">Core classes are checked automatically. Check only the specific
+      Elective/HSS courses you have chosen.</div>
+    <div id="courseList" class="course-list"></div>
+  </div>
+
+  <button id="syncBtn" onclick="startSync()">Save Config & Start Sync</button>
+  <div id="status" class="spinner">Processing data and setting up schedule...</div>
+
+  <script>
+    let savedSettings = {};
+
+      window.onload = function() {
+        google.script.run
+          .withSuccessHandler(initForm)
+          .withFailureHandler(err => alert("Init Error: " + err.message))
+          .getSavedSettings();
+      };
+      
+      function initForm(settings) {
+        savedSettings = settings;
+        
+        if(settings.dates.semStart) document.getElementById('semStart').value = settings.dates.semStart;
+        if(settings.dates.midStart) document.getElementById('midStart').value = settings.dates.midStart;
+        if(settings.dates.midEnd) document.getElementById('midEnd').value = settings.dates.midEnd;
+        if(settings.dates.endStart) document.getElementById('endStart').value = settings.dates.endStart;
+        if(settings.section) document.getElementById('sectionSelect').value = settings.section;
+        if(settings.batch) document.getElementById('batchSelect').value = settings.batch;
+
+        google.script.run.withSuccessHandler(populateCalendars).getCalendarList();
+        google.script.run.withSuccessHandler(populateSheets).getSheetNames();
+      }
+
+      function populateCalendars(cals) {
+        let select = document.getElementById('calSelect');
+        cals.forEach(c => {
+          let opt = document.createElement('option');
+          opt.value = c.id; opt.text = c.name;
+          if(c.id === savedSettings.calendarId) opt.selected = true;
+          select.appendChild(opt);
+        });
+      }
+
+      function populateSheets(names) {
+        let select = document.getElementById('semSelect');
+        names.forEach(n => {
+          if (n !== "Slots" && !n.includes("electives") && !n.includes("allocation")) {
+            let opt = document.createElement('option');
+            opt.value = n; opt.text = n;
+            if(n === savedSettings.sem) opt.selected = true;
+            select.appendChild(opt);
+          }
+        });
+        if(savedSettings.sem) loadCourses();
+      }
+
+      function loadCourses() {
+        let semName = document.getElementById('semSelect').value;
+        let sec = document.getElementById('sectionSelect').value;
+        let bat = document.getElementById('batchSelect').value;
+        
+        if (!semName) {
+          document.getElementById('courseContainer').style.display = 'none';
+          return;
+        }
+        document.getElementById('courseList').innerHTML = "<i>Loading courses...</i>";
+        document.getElementById('courseContainer').style.display = 'block';
+        
+        google.script.run.withSuccessHandler(renderCourses).getCourses(semName, sec, bat);
+      }
+
+      function renderCourses(courses) {
+        let container = document.getElementById('courseList');
+        container.innerHTML = "";
+        
+        let courseNames = Object.keys(courses);
+        if (courseNames.length === 0) {
+            container.innerHTML = "<i>No matching courses found for this section.</i>";
+            return;
+        }
+        
+        courseNames.forEach((course, idx) => {
+          let info = courses[course];
+          
+          // Core = Auto-checked. 
+          // If the user previously saved selections, use their history instead.
+          let isChecked = info.isCore;
+          if (savedSettings.selectedCourses && savedSettings.selectedCourses.length > 0) {
+              isChecked = savedSettings.selectedCourses.includes(course);
+          }
+          
+          let savedVal = savedSettings.courseConfig[course] || 'full';
+          
+          let html = `
+            <div class="course-item">
+              <div class="course-title">
+                 <input type="checkbox" id="chk_${idx}" value="${course}" ${isChecked ? 'checked' : ''} style="cursor:pointer;">
+                 <label for="chk_${idx}" style="display:inline; margin-top:0; cursor:pointer;">${course} ${info.isCore ? '' : '<span style="color:#e67c73; font-size:11px; margin-left:5px;">(Elective)</span>'}</label>
+              </div>
+              <div class="radio-group">
+                <label><input type="radio" name="dur_${idx}" value="full" ${savedVal==='full'?'checked':''}> Full Sem</label>
+                <label><input type="radio" name="dur_${idx}" value="pre" ${savedVal==='pre'?'checked':''}> Pre-Mid</label>
+                <label><input type="radio" name="dur_${idx}" value="post" ${savedVal==='post'?'checked':''}> Post-Mid</label>
+              </div>
+            </div>
+          `;
+          container.insertAdjacentHTML('beforeend', html);
+        });
+        
+        container.dataset.courses = JSON.stringify(courseNames);
+      }
+      
+      function startSync() {
+        let sem = document.getElementById('semSelect').value;
+        let cal = document.getElementById('calSelect').value;
+        if(!sem || !cal) return alert("Please select a calendar and semester.");
+        
+        document.getElementById('syncBtn').disabled = true;
+        document.getElementById('status').style.display = 'block';
+        
+        let payload = {
+          semName: sem,
+          section: document.getElementById('sectionSelect').value,
+          batch: document.getElementById('batchSelect').value,
+          calendarId: cal,
+          dates: {
+            semStart: document.getElementById('semStart').value,
+            midStart: document.getElementById('midStart').value,
+            midEnd: document.getElementById('midEnd').value,
+            endStart: document.getElementById('endStart').value
+          },
+          courseConfig: {},
+          selectedCourses: []
+        };
+        
+        let courses = JSON.parse(document.getElementById('courseList').dataset.courses || '[]');
+        courses.forEach((course, idx) => {
+          let chk = document.getElementById(`chk_${idx}`);
+          if (chk.checked) {
+             payload.selectedCourses.push(course);
+             let radios = document.getElementsByName(`dur_${idx}`);
+             for (let r of radios) { if (r.checked) payload.courseConfig[course] = r.value; }
+          }
+        });
+        
+        google.script.run
+          .withSuccessHandler(() => {
+            document.getElementById('status').innerHTML = '<b>✅ Config Saved!</b> Background sync is active.';
+            document.getElementById('status').style.color = 'green';
+          })
+          .withFailureHandler((err) => {
+            document.getElementById('status').innerText = '❌ Error: ' + err.message;
+            document.getElementById('status').style.color = 'red';
+            document.getElementById('syncBtn').disabled = false;
+          })
+          .saveSettingsAndSync(payload);
+      }
+  </script>
+</body>
+
+</html>
