@@ -81,19 +81,19 @@ function executeSync(semName, calendarId) {
   let slotSheet = ss.getSheetByName("Slots");
   let semSheet = ss.getSheetByName(semName);
   if (!slotSheet || !semSheet) return;
-
+  
   let props = PropertiesService.getUserProperties();
   let section = props.getProperty('SYNC_SECTION') || 'A';
   let batch = props.getProperty('SYNC_BATCH') || 'Both';
   let dates = JSON.parse(props.getProperty('SYNC_DATES') || '{}');
   let courseConfig = JSON.parse(props.getProperty('SYNC_COURSE_CONFIG') || '{}');
   let selectedCourses = JSON.parse(props.getProperty('SYNC_SELECTED_COURSES') || '[]');
-
+  
   let slotMapping = readSlots(slotSheet);
   let parsed = parseTimetable(semSheet, slotMapping, section, batch);
-
+  
   let desiredEvents = parsed.events.filter(ev => selectedCourses.includes(ev.rawTitle));
-
+  
   let existingEventsMap = {};
   let pageToken = null;
   do {
@@ -106,61 +106,85 @@ function executeSync(semName, calendarId) {
     }
     pageToken = response.nextPageToken;
   } while (pageToken);
-
+  
   let processedSyncIds = {};
-
+  
+  // Calculate precise boundaries (x-1, y+1, end-1)
+  let preMidEnd = dates.midStart ? new Date(dates.midStart) : new Date(dates.endStart);
+  if (dates.midStart) preMidEnd.setDate(preMidEnd.getDate() - 1);
+  
+  let postMidStart = dates.midEnd ? new Date(dates.midEnd) : new Date(dates.semStart);
+  if (dates.midEnd) postMidStart.setDate(postMidStart.getDate() + 1);
+  
+  let finalEnd = dates.endStart ? new Date(dates.endStart) : new Date();
+  if (dates.endStart) finalEnd.setDate(finalEnd.getDate() - 1);
+  
   for (let i = 0; i < desiredEvents.length; i++) {
     let evData = desiredEvents[i];
-    processedSyncIds[evData.syncId] = true;
-
     let durationType = courseConfig[evData.rawTitle] || 'full';
-    let startBoundary = dates.semStart;
-    let endBoundary = dates.endStart;
-
-    if (durationType === 'pre') endBoundary = dates.midStart;
-    else if (durationType === 'post') startBoundary = dates.midEnd;
-
-    if (!startBoundary || !endBoundary) continue;
-
-    // Pass the slot code so duration can be intelligently applied
-    let startEnd = getFirstOccurrence(startBoundary, evData.day, evData.timeStr, evData.slot);
-    if (!startEnd) continue;
-
-    let untilDate = new Date(endBoundary); untilDate.setHours(23, 59, 59);
-    let untilStr = untilDate.toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z';
-
-    let eventResource = {
-      summary: evData.title,
-      location: evData.location,
-      start: { dateTime: startEnd.start.toISOString(), timeZone: Session.getScriptTimeZone() },
-      end: { dateTime: startEnd.end.toISOString(), timeZone: Session.getScriptTimeZone() },
-      recurrence: ["RRULE:FREQ=WEEKLY;UNTIL=" + untilStr],
-      extendedProperties: { private: { app: 'iiitdwd_sync', syncId: evData.syncId } }
-    };
-
-    let existing = existingEventsMap[evData.syncId];
-    if (existing) {
-      let exStart = existing.start.dateTime || existing.start.date;
-      let d1 = new Date(exStart); let d2 = new Date(eventResource.start.dateTime);
-      let exEnd = existing.end.dateTime || existing.end.date;
-      let e1 = new Date(exEnd); let e2 = new Date(eventResource.end.dateTime);
-
-      // Update triggered if start OR end time differs (fixes broken durations automatically)
-      if (existing.summary !== eventResource.summary || existing.location !== eventResource.location ||
-        d1.getHours() !== d2.getHours() || d1.getMinutes() !== d2.getMinutes() ||
-        e1.getHours() !== e2.getHours() || e1.getMinutes() !== e2.getMinutes() ||
-        !existing.recurrence || !existing.recurrence[0].includes(untilStr)) {
-        Calendar.Events.update(eventResource, calendarId, existing.id);
-      }
+    
+    // Split scheduling into separate periods to avoid exam overlap
+    let periods = [];
+    if (durationType === 'pre') {
+      periods.push({ start: dates.semStart, end: preMidEnd, suffix: '_pre' });
+    } else if (durationType === 'post') {
+      periods.push({ start: postMidStart, end: finalEnd, suffix: '_post' });
     } else {
-      Calendar.Events.insert(eventResource, calendarId);
+      // Full sem: Split into two completely separate recurring events
+      periods.push({ start: dates.semStart, end: preMidEnd, suffix: '_pre' });
+      periods.push({ start: postMidStart, end: finalEnd, suffix: '_post' });
+    }
+    
+    for (let p of periods) {
+      if (!p.start || !p.end) continue;
+      
+      let specificSyncId = evData.syncId + p.suffix;
+      processedSyncIds[specificSyncId] = true;
+      
+      let startEnd = getFirstOccurrence(p.start, evData.day, evData.timeStr, evData.slot);
+      if (!startEnd) continue;
+      
+      let untilDate = new Date(p.end); 
+      untilDate.setHours(23, 59, 59);
+      
+      // Safety: Skip event generation if the first class starts after the period ends
+      if (startEnd.start > untilDate) continue;
+      
+      let untilStr = untilDate.toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z';
+      
+      let eventResource = {
+        summary: evData.title,
+        location: evData.location,
+        start: { dateTime: startEnd.start.toISOString(), timeZone: Session.getScriptTimeZone() },
+        end: { dateTime: startEnd.end.toISOString(), timeZone: Session.getScriptTimeZone() },
+        recurrence: ["RRULE:FREQ=WEEKLY;UNTIL=" + untilStr],
+        extendedProperties: { private: { app: 'iiitdwd_sync', syncId: specificSyncId } }
+      };
+      
+      let existing = existingEventsMap[specificSyncId];
+      if (existing) {
+        let exStart = existing.start.dateTime || existing.start.date;
+        let d1 = new Date(exStart); let d2 = new Date(eventResource.start.dateTime);
+        let exEnd = existing.end.dateTime || existing.end.date;
+        let e1 = new Date(exEnd); let e2 = new Date(eventResource.end.dateTime);
+        
+        if (existing.summary !== eventResource.summary || existing.location !== eventResource.location ||
+            d1.getHours() !== d2.getHours() || d1.getMinutes() !== d2.getMinutes() || 
+            e1.getHours() !== e2.getHours() || e1.getMinutes() !== e2.getMinutes() || 
+            !existing.recurrence || !existing.recurrence[0].includes(untilStr)) {
+          Calendar.Events.update(eventResource, calendarId, existing.id);
+        }
+      } else {
+        Calendar.Events.insert(eventResource, calendarId);
+      }
     }
   }
-
+  
+  // This loop automatically deletes the old, flawed full-sem events
   let existingKeys = Object.keys(existingEventsMap);
   for (let i = 0; i < existingKeys.length; i++) {
     if (!processedSyncIds[existingKeys[i]]) {
-      try { Calendar.Events.remove(calendarId, existingEventsMap[existingKeys[i]].id); } catch (e) { }
+      try { Calendar.Events.remove(calendarId, existingEventsMap[existingKeys[i]].id); } catch(e) {}
     }
   }
 }
